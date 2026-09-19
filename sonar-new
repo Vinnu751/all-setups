@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # SonarQube Community Build 26.1.0.118079 - Amazon Linux setup
-# Requires: sudo/root access and Java 21 JDK
+# Requires: sudo/root access
+# Installs: Java 21 JDK + SonarQube configuration
 
 set -e
 
@@ -11,32 +12,91 @@ SONAR_USER="sonarqube"
 JAVA_BIN="/usr/lib/jvm/java-21-amazon-corretto.x86_64/bin/java"
 SONAR_JAR="$SONAR_DIR/lib/sonar-application-${SONAR_VERSION}.jar"
 
-echo "=== 1. Checking Java 21 ==="
+echo "=========================================="
+echo "=== 1. Installing Java 21 ==="
+echo "=========================================="
+
+sudo dnf install java-21-amazon-corretto-devel -y
+
+echo
+echo "Java installation completed."
+echo
+
+echo "=== Checking Java 21 ==="
+
 if [ ! -x "$JAVA_BIN" ]; then
     echo "ERROR: Java 21 was not found at:"
     echo "$JAVA_BIN"
-    echo "Run: readlink -f \$(which java)"
+    echo
+    echo "Checking Java installation..."
+    readlink -f "$(which java)"
     exit 1
 fi
 
 "$JAVA_BIN" -version
 
-echo "=== 2. Creating SonarQube user ==="
+
+echo
+echo "=========================================="
+echo "=== 2. Setting JAVA_HOME ==="
+echo "=========================================="
+
+JAVA_HOME="/usr/lib/jvm/java-21-amazon-corretto.x86_64"
+
+export JAVA_HOME
+export PATH="$JAVA_HOME/bin:$PATH"
+
+echo "JAVA_HOME=$JAVA_HOME"
+
+# Make JAVA_HOME available system-wide
+sudo tee /etc/profile.d/java.sh >/dev/null <<EOF
+export JAVA_HOME=$JAVA_HOME
+export PATH=\$JAVA_HOME/bin:\$PATH
+EOF
+
+sudo chmod +x /etc/profile.d/java.sh
+
+
+echo
+echo "=========================================="
+echo "=== 3. Creating SonarQube user ==="
+echo "=========================================="
+
 if ! id "$SONAR_USER" >/dev/null 2>&1; then
     sudo useradd -r -m -d "$SONAR_DIR" -s /bin/bash "$SONAR_USER"
+    echo "User '$SONAR_USER' created."
+else
+    echo "User '$SONAR_USER' already exists."
 fi
 
-echo "=== 3. Checking SonarQube installation ==="
+
+echo
+echo "=========================================="
+echo "=== 4. Checking SonarQube installation ==="
+echo "=========================================="
+
 if [ ! -f "$SONAR_JAR" ]; then
     echo "ERROR: SonarQube JAR not found:"
     echo "$SONAR_JAR"
     exit 1
 fi
 
-echo "=== 4. Fixing ownership ==="
+echo "SonarQube installation found."
+
+
+echo
+echo "=========================================="
+echo "=== 5. Fixing ownership ==="
+echo "=========================================="
+
 sudo chown -R "$SONAR_USER:$SONAR_USER" "$SONAR_DIR"
 
-echo "=== 5. Configuring kernel parameters ==="
+
+echo
+echo "=========================================="
+echo "=== 6. Configuring kernel parameters ==="
+echo "=========================================="
+
 sudo tee /etc/sysctl.d/99-sonarqube.conf >/dev/null <<EOF
 vm.max_map_count=524288
 fs.file-max=131072
@@ -44,22 +104,33 @@ EOF
 
 sudo sysctl --system
 
-echo "=== 6. Configuring user limits ==="
+
+echo
+echo "=========================================="
+echo "=== 7. Configuring user limits ==="
+echo "=========================================="
+
 sudo tee /etc/security/limits.d/99-sonarqube.conf >/dev/null <<EOF
 $SONAR_USER   -   nofile   131072
 $SONAR_USER   -   nproc    8192
 EOF
 
-echo "=== 7. Configuring SonarQube web server ==="
+
+echo
+echo "=========================================="
+echo "=== 8. Configuring SonarQube web server ==="
+echo "=========================================="
+
 SONAR_PROPERTIES="$SONAR_DIR/conf/sonar.properties"
 
-# Uncomment/update these values if they already exist; otherwise append them.
+# Configure SonarQube host
 if grep -qE '^[[:space:]]*sonar\.web\.host=' "$SONAR_PROPERTIES"; then
     sudo sed -i 's|^[[:space:]]*sonar\.web\.host=.*|sonar.web.host=0.0.0.0|' "$SONAR_PROPERTIES"
 else
     echo "sonar.web.host=0.0.0.0" | sudo tee -a "$SONAR_PROPERTIES" >/dev/null
 fi
 
+# Configure SonarQube port
 if grep -qE '^[[:space:]]*sonar\.web\.port=' "$SONAR_PROPERTIES"; then
     sudo sed -i 's|^[[:space:]]*sonar\.web\.port=.*|sonar.web.port=9000|' "$SONAR_PROPERTIES"
 else
@@ -68,7 +139,12 @@ fi
 
 sudo chown "$SONAR_USER:$SONAR_USER" "$SONAR_PROPERTIES"
 
-echo "=== 8. Creating systemd service ==="
+
+echo
+echo "=========================================="
+echo "=== 9. Creating systemd service ==="
+echo "=========================================="
+
 sudo tee /etc/systemd/system/sonarqube.service >/dev/null <<EOF
 [Unit]
 Description=SonarQube service
@@ -78,6 +154,9 @@ After=syslog.target network.target
 Type=simple
 User=$SONAR_USER
 Group=$SONAR_USER
+
+Environment="JAVA_HOME=$JAVA_HOME"
+Environment="PATH=$JAVA_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
 
 ExecStart=$JAVA_BIN -Xms32m -Xmx32m -Djava.net.preferIPv4Stack=true -jar $SONAR_JAR
 
@@ -95,30 +174,71 @@ SuccessExitStatus=143
 WantedBy=multi-user.target
 EOF
 
-echo "=== 9. Reloading systemd ==="
-sudo systemctl daemon-reload
-
-echo "=== 10. Enabling SonarQube at boot ==="
-sudo systemctl enable sonarqube
-
-echo "=== 11. Starting SonarQube ==="
-sudo systemctl restart sonarqube
 
 echo
-echo "SonarQube is starting. This can take 30-60+ seconds."
+echo "=========================================="
+echo "=== 10. Reloading systemd ==="
+echo "=========================================="
+
+sudo systemctl daemon-reload
+
+
+echo
+echo "=========================================="
+echo "=== 11. Enabling SonarQube at boot ==="
+echo "=========================================="
+
+sudo systemctl enable sonarqube
+
+
+echo
+echo "=========================================="
+echo "=== 12. Starting SonarQube ==="
+echo "=========================================="
+
+sudo systemctl restart sonarqube
+
+
+echo
+echo "SonarQube is starting."
+echo "This can take 30-60+ seconds."
 echo
 
 sleep 10
 
-echo "=== Service status ==="
-sudo systemctl --no-pager status sonarqube || true
 
 echo
+echo "=========================================="
+echo "=== Service status ==="
+echo "=========================================="
+
+sudo systemctl --no-pager status sonarqube || true
+
+
+echo
+echo "=========================================="
+echo "=== Installation Completed ==="
+echo "=========================================="
+
+echo
+echo "Java version:"
+"$JAVA_BIN" -version
+
+echo
+echo "JAVA_HOME:"
+echo "$JAVA_HOME"
+
+echo
+echo "=========================================="
 echo "=== Useful commands ==="
+echo "=========================================="
+
 echo "Status : sudo systemctl status sonarqube"
 echo "Logs   : sudo journalctl -u sonarqube -n 100 --no-pager"
 echo "Restart: sudo systemctl restart sonarqube"
 echo "Stop   : sudo systemctl stop sonarqube"
+
 echo
 echo "Web UI : http://<EC2-PUBLIC-IP>:9000"
 echo "Default login: admin / admin"
+echo
